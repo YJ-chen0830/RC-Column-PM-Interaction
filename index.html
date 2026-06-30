@@ -142,10 +142,8 @@ function buildBarLayout(b, h, dcover, n){
   const pts = [];
   const halfB = b/2 - dcover, halfH = h/2 - dcover;
   if(n < 4) n = 4;
-  // corners + even split along 4 sides proportional to side length
   const perim = 2*(2*halfB + 2*halfH);
   const positions = [];
-  // place on rectangle outline parametrically
   for(let i=0;i<n;i++){
     const t = i/n;
     const s = t*perim;
@@ -174,7 +172,6 @@ function beta1(fc){
 
 function phiFactor(colType, epsT){
   // ACI 318-19 21.2.2
-  const epsTy = 0.002; // simplified using fy=420 ~ approx; refined below per fy
   const phiMin = colType==='spiral'?0.75:0.65;
   if(epsT <= 0.002) return phiMin;
   if(epsT >= 0.005) return 0.90;
@@ -182,27 +179,26 @@ function phiFactor(colType, epsT){
 }
 
 function computePoint(c, b, h, fc, fy, Es, barAreas, barPts, beta1v){
-  // c measured from extreme compression fiber (top, y=-h/2) ; neutral axis depth
+  // c measured from extreme compression fiber (top, y=-h/2); neutral axis depth
   const ecu = 0.003;
   const a = Math.min(beta1v*c, h);
   const Cc = 0.85*fc*a*b; // N (mm,MPa -> N)
-  const yTopFiber = -h/2;
-  const momCc = Cc*( - ( -h/2 + a/2) ); // moment about centroid, compression block centroid at top+a/2
-  // Steel forces
+  const momCc = Cc*( - ( -h/2 + a/2) ); // moment about centroid
+
   let Ps = 0, Ms = 0;
   barPts.forEach((p, idx)=>{
     const y = p.y; // distance from centroid, - is top (compression side)
-    const strain = ecu * (c - (y + h/2)) / c; // y+h/2 = distance from top fiber
+    const strain = ecu * (c - (y + h/2)) / c;
     let stress = strain*Es;
     if(stress > fy) stress = fy;
     if(stress < -fy) stress = -fy;
     const force = stress*barAreas[idx]; // N, +compression
     Ps += force;
-    Ms += -force*y; // moment about centroid
+    Ms += -force*y;
   });
-  // extreme tension steel strain = bar farthest from compression face (max y)
+
   const maxY = Math.max(...barPts.map(p=>p.y));
-  const dt = maxY + h/2; // distance from top fiber to extreme tension bar
+  const dt = maxY + h/2;
   const epsT2 = ecu*(dt-c)/c; // positive = tension
   const Pn = (Cc + Ps)/1000; // kN
   const Mn = (momCc + Ms)/1e6; // kN·m
@@ -228,17 +224,14 @@ function run(){
   const Ast = barArea*barCount;
   const beta1v = beta1(fc);
 
-  // Pure axial compression (c -> infinity approximation): Po
   const Ag = b*h;
-   const Po = (0.85*fc*(Ag-Ast) + fy*Ast)/1000; // kN
-  const PnMaxCompCap = colType==='spiral'?0.85*Po:0.80*Po; // ACI cap
+  const Po = (0.85*fc*(Ag-Ast) + fy*Ast)/1000; // kN
+  const PnMaxCompCap = colType==='spiral'?0.85*Po:0.80*Po;
 
   // sweep c from small (tension-controlled) to large (compression-controlled).
   // keep this natural order when drawing — sorting by Mn would splice the
   // ascending and descending branches together and zig-zag the curve.
   const points = [];
-  const cMax = h*3; // sweep range
-  const steps = 120;
   const cMax = h*3;
   const steps = 200;
   for(let i=1;i<=steps;i++){
@@ -247,25 +240,17 @@ function run(){
     const phi = phiFactor(colType, pt.epsT);
     points.push({Pn:pt.Pn, Mn:Math.abs(pt.Mn), phi, phiPn:Math.min(pt.Pn,PnMaxCompCap)*phi, phiMn:Math.abs(pt.Mn)*phi});
   }
-  // pure tension point
-  // pure tension point (c -> 0, all bars yielding in tension) goes first
   const PnTension = -fy*Ast/1000;
-  points.push({Pn:PnTension, Mn:0, phi:0.9, phiPn:PnTension*0.9, phiMn:0});
-  points.sort((a,b)=>a.Mn-b.Mn);
   points.unshift({Pn:PnTension, Mn:0, phi:0.9, phiPn:PnTension*0.9, phiMn:0});
 
   drawChart(points, Pu, Mu);
 
-  // find capacity at demand Mu via interpolation on phi curve (nearest Pn match for given Mu, take envelope max phiMn for given phiPn~Pu)
   // --- key points -------------------------------------------------
-  // 1) max axial point = pure compression Po (c -> infinity, M=0)
   const maxAxialPt = {Pn:Po, Mn:0, phiPn:PnMaxCompCap, phiMn:0};
 
-  // 2) max moment point = peak of the φMn curve (balanced failure point)
   let maxMomentPt = points[0];
   points.forEach(p=>{ if(p.phiMn > maxMomentPt.phiMn) maxMomentPt = p; });
 
-  // 3) pure bending point = where Pn crosses 0 (axial load = 0)
   let pureBendingPt = null;
   for(let i=1;i<points.length;i++){
     const a = points[i-1], b2 = points[i];
@@ -280,15 +265,15 @@ function run(){
   }
   if(!pureBendingPt) pureBendingPt = {Mn:0, phiMn:0};
 
-  // find capacity at demand Pu via nearest-point search on the natural sweep
   let capMn = interpCapacity(points, Pu);
   const resultDiv = document.getElementById('result');
   const ratio = Mu/capMn;
+  const status = (Pu<=PnMaxCompCap*0.9 && ratio<=1.0) ? '<span class="ok">OK 安全</span>' : '<span class="ng">NG 超出容量，請加大斷面或筋量</span>';
+  resultDiv.innerHTML = `
+    <table>
       <tr><td>Ag (mm²)</td><td>${Ag.toFixed(0)}</td></tr>
       <tr><td>Ast 總筋量 (mm²)</td><td>${Ast.toFixed(0)} (ρg=${(Ast/Ag*100).toFixed(2)}%)</td></tr>
       <tr><td>β1</td><td>${beta1v.toFixed(3)}</td></tr>
-      <tr><td>Po 全壓純軸力 (kN)</td><td>${Po.toFixed(0)}</td></tr>
-      <tr><td>φPn,max 壓力上限 (kN)</td><td>${PnMaxCompCap.toFixed(0)}</td></tr>
       <tr><td>在 Pu=${Pu} kN 下 φMn 容量 (kN·m)</td><td>${capMn.toFixed(1)}</td></tr>
       <tr><td>Mu/φMn</td><td>${ratio.toFixed(2)}</td></tr>
       <tr><td>判定</td><td>${status}</td></tr>
@@ -301,6 +286,34 @@ function run(){
     </table>
   `;
 }
+
+function interpCapacity(points, Pu){
+  let best = null, bestDiff = Infinity;
+  points.forEach(p=>{
+    const diff = Math.abs(p.phiPn - Pu);
+    if(diff < bestDiff){bestDiff = diff; best = p;}
+  });
+  return best ? best.phiMn : 0;
+}
+
+function drawChart(points, Pu, Mu){
+  const svg = document.getElementById('chart');
+  svg.innerHTML = '';
+  const W=640,H=480,ml=70,mr=20,mt=20,mb=50;
+  const plotW=W-ml-mr, plotH=H-mt-mb;
+  const maxM = Math.max(...points.map(p=>p.phiMn), Mu)*1.15+1;
+  const maxP = Math.max(...points.map(p=>p.phiPn), Pu)*1.15+1;
+  const minP = Math.min(...points.map(p=>p.phiPn), 0)*1.15;
+
+  function X(m){return ml + (m/maxM)*plotW;}
+  function Y(p){return mt + plotH - ((p-minP)/(maxP-minP))*plotH;}
+
+  let svgns = "http://www.w3.org/2000/svg";
+  function el(tag,attrs){
+    const e = document.createElementNS(svgns,tag);
+    for(const k in attrs) e.setAttribute(k,attrs[k]);
+    return e;
+  }
   svg.appendChild(el('line',{x1:X(0),y1:Y(minP),x2:X(0),y2:Y(maxP),stroke:'#999'}));
   svg.appendChild(el('line',{x1:X(0),y1:Y(0),x2:X(maxM),y2:Y(0),stroke:'#999'}));
   svg.appendChild(el('text',{x:ml,y:H-15,'font-size':12,fill:'#555'})).textContent='Mn (kN·m) →';
@@ -308,20 +321,17 @@ function run(){
   ylabel.textContent='Pn (kN)';
   svg.appendChild(ylabel);
 
-  // φPn-φMn envelope curve
   let path = '';
   points.forEach((p,i)=>{
     path += (i===0?'M':'L') + X(p.phiMn) + ',' + Y(p.phiPn) + ' ';
   });
   svg.appendChild(el('path',{d:path, fill:'none', stroke:'#c9a14a', 'stroke-width':2.5}));
 
-  // demand point
   svg.appendChild(el('circle',{cx:X(Mu), cy:Y(Pu), r:6, fill:'#0b1f3a'}));
   const lbl = el('text',{x:X(Mu)+10, y:Y(Pu)-8, 'font-size':12, fill:'#0b1f3a', 'font-weight':'bold'});
   lbl.textContent = `(Mu=${Mu}, Pu=${Pu})`;
   svg.appendChild(lbl);
 
-  // legend
   const leg = el('text',{x:ml+10,y:mt+15,'font-size':12,fill:'#c9a14a','font-weight':'bold'});
   leg.textContent = '— φPn-φMn 設計強度包絡線';
   svg.appendChild(leg);
