@@ -230,12 +230,17 @@ function run(){
 
   // Pure axial compression (c -> infinity approximation): Po
   const Ag = b*h;
-  const Po = (0.85*fc*(Ag-Ast) + fy*Ast)/1000; // kN
+   const Po = (0.85*fc*(Ag-Ast) + fy*Ast)/1000; // kN
   const PnMaxCompCap = colType==='spiral'?0.85*Po:0.80*Po; // ACI cap
 
+  // sweep c from small (tension-controlled) to large (compression-controlled).
+  // keep this natural order when drawing — sorting by Mn would splice the
+  // ascending and descending branches together and zig-zag the curve.
   const points = [];
   const cMax = h*3; // sweep range
   const steps = 120;
+  const cMax = h*3;
+  const steps = 200;
   for(let i=1;i<=steps;i++){
     const c = cMax*i/steps;
     const pt = computePoint(c, b, h, fc, fy, Es, barAreas, barPts, beta1v);
@@ -243,19 +248,42 @@ function run(){
     points.push({Pn:pt.Pn, Mn:Math.abs(pt.Mn), phi, phiPn:Math.min(pt.Pn,PnMaxCompCap)*phi, phiMn:Math.abs(pt.Mn)*phi});
   }
   // pure tension point
+  // pure tension point (c -> 0, all bars yielding in tension) goes first
   const PnTension = -fy*Ast/1000;
   points.push({Pn:PnTension, Mn:0, phi:0.9, phiPn:PnTension*0.9, phiMn:0});
   points.sort((a,b)=>a.Mn-b.Mn);
+  points.unshift({Pn:PnTension, Mn:0, phi:0.9, phiPn:PnTension*0.9, phiMn:0});
 
   drawChart(points, Pu, Mu);
 
   // find capacity at demand Mu via interpolation on phi curve (nearest Pn match for given Mu, take envelope max phiMn for given phiPn~Pu)
+  // --- key points -------------------------------------------------
+  // 1) max axial point = pure compression Po (c -> infinity, M=0)
+  const maxAxialPt = {Pn:Po, Mn:0, phiPn:PnMaxCompCap, phiMn:0};
+
+  // 2) max moment point = peak of the φMn curve (balanced failure point)
+  let maxMomentPt = points[0];
+  points.forEach(p=>{ if(p.phiMn > maxMomentPt.phiMn) maxMomentPt = p; });
+
+  // 3) pure bending point = where Pn crosses 0 (axial load = 0)
+  let pureBendingPt = null;
+  for(let i=1;i<points.length;i++){
+    const a = points[i-1], b2 = points[i];
+    if((a.Pn<=0 && b2.Pn>=0) || (a.Pn>=0 && b2.Pn<=0)){
+      const t = Math.abs(a.Pn) / (Math.abs(a.Pn)+Math.abs(b2.Pn) || 1);
+      pureBendingPt = {
+        Mn: a.Mn + (b2.Mn-a.Mn)*t,
+        phiMn: a.phiMn + (b2.phiMn-a.phiMn)*t
+      };
+      break;
+    }
+  }
+  if(!pureBendingPt) pureBendingPt = {Mn:0, phiMn:0};
+
+  // find capacity at demand Pu via nearest-point search on the natural sweep
   let capMn = interpCapacity(points, Pu);
   const resultDiv = document.getElementById('result');
   const ratio = Mu/capMn;
-  const status = (Pu<=PnMaxCompCap*0.9 && ratio<=1.0) ? '<span class="ok">OK 安全</span>' : '<span class="ng">NG 超出容量，請加大斷面或筋量</span>';
-  resultDiv.innerHTML = `
-    <table>
       <tr><td>Ag (mm²)</td><td>${Ag.toFixed(0)}</td></tr>
       <tr><td>Ast 總筋量 (mm²)</td><td>${Ast.toFixed(0)} (ρg=${(Ast/Ag*100).toFixed(2)}%)</td></tr>
       <tr><td>β1</td><td>${beta1v.toFixed(3)}</td></tr>
@@ -265,38 +293,14 @@ function run(){
       <tr><td>Mu/φMn</td><td>${ratio.toFixed(2)}</td></tr>
       <tr><td>判定</td><td>${status}</td></tr>
     </table>
+    <h3 style="margin:16px 0 6px; font-size:13.5px; color:#0b1f3a;">關鍵點 Key Points</h3>
+    <table>
+      <tr><td>① 最大軸力點 Po (純壓, M=0)</td><td>Pn=${maxAxialPt.Pn.toFixed(0)} kN<br>φPn=${maxAxialPt.phiPn.toFixed(0)} kN</td></tr>
+      <tr><td>② 最大彎矩點 (平衡破壞點)</td><td>Pn=${maxMomentPt.Pn.toFixed(0)} kN, Mn=${maxMomentPt.Mn.toFixed(1)} kN·m<br>φPn=${maxMomentPt.phiPn.toFixed(0)} kN, φMn=${maxMomentPt.phiMn.toFixed(1)} kN·m</td></tr>
+      <tr><td>③ 純彎矩點 (P=0)</td><td>Mn=${pureBendingPt.Mn.toFixed(1)} kN·m<br>φMn=${pureBendingPt.phiMn.toFixed(1)} kN·m</td></tr>
+    </table>
   `;
 }
-
-function interpCapacity(points, Pu){
-  // points sorted by Mn ascending; find the phiMn at the c-value whose phiPn closest to Pu, scanning original (unsorted) ordering would be better, but approximate via search
-  let best = null, bestDiff = Infinity;
-  points.forEach(p=>{
-    const diff = Math.abs(p.phiPn - Pu);
-    if(diff < bestDiff){bestDiff = diff; best = p;}
-  });
-  return best ? best.phiMn : 0;
-}
-
-function drawChart(points, Pu, Mu){
-  const svg = document.getElementById('chart');
-  svg.innerHTML = '';
-  const W=640,H=480,ml=70,mr=20,mt=20,mb=50;
-  const plotW=W-ml-mr, plotH=H-mt-mb;
-  const maxM = Math.max(...points.map(p=>p.phiMn), Mu)*1.15+1;
-  const maxP = Math.max(...points.map(p=>p.phiPn), Pu)*1.15+1;
-  const minP = Math.min(...points.map(p=>p.phiPn), 0)*1.15;
-
-  function X(m){return ml + (m/maxM)*plotW;}
-  function Y(p){return mt + plotH - ((p-minP)/(maxP-minP))*plotH;}
-
-  let svgns = "http://www.w3.org/2000/svg";
-  function el(tag,attrs){
-    const e = document.createElementNS(svgns,tag);
-    for(const k in attrs) e.setAttribute(k,attrs[k]);
-    return e;
-  }
-  // axes
   svg.appendChild(el('line',{x1:X(0),y1:Y(minP),x2:X(0),y2:Y(maxP),stroke:'#999'}));
   svg.appendChild(el('line',{x1:X(0),y1:Y(0),x2:X(maxM),y2:Y(0),stroke:'#999'}));
   svg.appendChild(el('text',{x:ml,y:H-15,'font-size':12,fill:'#555'})).textContent='Mn (kN·m) →';
